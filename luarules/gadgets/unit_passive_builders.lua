@@ -39,9 +39,6 @@ end
 ----------------------------------------------------------------
 local CMD_PASSIVE = 34571
 
-local stallMarginInc = 0.2
-local stallMarginSto = 0.01
-
 local ruleName = "passiveBuilders"
 
 local cmdPassiveDesc = {
@@ -60,25 +57,21 @@ local spInsertUnitCmdDesc = Spring.InsertUnitCmdDesc
 local spFindUnitCmdDesc = Spring.FindUnitCmdDesc
 local spGetUnitCmdDescs = Spring.GetUnitCmdDescs
 local spEditUnitCmdDesc = Spring.EditUnitCmdDesc
+
 local spGetTeamResources = Spring.GetTeamResources
-local spGetTeamList = Spring.GetTeamList
 local spGetUnitDefID = Spring.GetUnitDefID
 local spSetUnitRulesParam = Spring.SetUnitRulesParam
 local spSetUnitBuildSpeed = Spring.SetUnitBuildSpeed
 local spGetUnitIsBuilding = Spring.GetUnitIsBuilding
 local spValidUnitID = Spring.ValidUnitID
-local simSpeed = Game.gameSpeed
 
 local min = math.min
 local max = math.max
-local floor = math.floor
 
 local teams = {}
 local builders = {}
 local targets = {}
 local idealExpenses = {}
-
-local passiveConstructorSpeedFactor = 0
 
 local canPassive = {}
 for unitDefID, unitDef in pairs(UnitDefs) do
@@ -96,33 +89,27 @@ local function Builder(unitDef)
 end
 
 local function SetPassive(teamID, unitID)
-    Spring.Echo("Setting " .. unitID .. " passive. Buildspeed was " .. teams[teamID].builders[unitID].buildSpeed)
-    Spring.Echo("Passive constructor speed factor: " .. passiveConstructorSpeedFactor)
+    local builder = teams[teamID].builders[unitID]
+    -- Spring.Echo("Setting " .. unitID .. " to passive. Was building with speed " .. builder.buildSpeed .. ".")
     teams[teamID].builders[unitID].isPassive = true
 end
 
 local function SetActive(teamID, unitID)
     local builder = teams[teamID].builders[unitID]
-    Spring.Echo("Setting " .. unitID .. " active. Buildspeed was " .. builder.buildSpeed)
-    Spring.Echo("Passive constructor speed factor: " .. passiveConstructorSpeedFactor)
     spSetUnitBuildSpeed(unitID, builder.unitDef.buildSpeed)
     builder.isPassive = false
+    -- Spring.Echo("Setting " .. unitID .. " to active. Was building with speed " .. builder.buildSpeed .. ".")
     builder.buildSpeed = builder.unitDef.buildSpeed
 end
 
-function Team(buildersNotBuilding)
+local function Team(buildersNotBuilding)
     local newTeam = {}
+    newTeam.passiveConstructorSpeedFactor = 0
     newTeam.builders = {}
     return newTeam
 end
 
-function GetResources(teamID)
-    local currentMetal = spGetTeamResources(teamID, "metal")
-    local currentEnergy = spGetTeamResources(teamID, "energy") 
-    return Expense(currentMetal, currentEnergy)
-end
-
-function UnitDef(unitID)
+local function UnitDef(unitID)
     return UnitDefs[spGetUnitDefID(unitID)]
 end
 
@@ -135,63 +122,65 @@ local function AddBuilder(builderID, builderUnitDefID, teamID)
     end
 end
 
-function RemoveBuilder(teamID, builderID)
+local function RemoveBuilder(teamID, builderID)
     teams[teamID].builders[builderID] = nil
 end 
 
-function Copy(expense)
+local function Copy(expense)
     return Expense(expense.metal, expense.energy)
 end
-function Expense(metal, energy)
+
+local function Expense(metal, energy)
     local newExpense = {}
     newExpense.metal = metal
     newExpense.energy = energy
     return newExpense
 end
 
-function Add(expense, otherExpense)
+local function Add(expense, otherExpense)
     expense.metal = expense.metal + otherExpense.metal
     expense.energy = expense.energy + otherExpense.energy
 end
-function Subtract(expense, otherExpense, cap)
+
+local function Subtract(expense, otherExpense, cap)
     expense.metal = expense.metal - otherExpense.metal
     expense.energy = expense.energy - otherExpense.energy
 end
-function Multiply(expense, number)
+
+local function Multiply(expense, number)
     expense.metal = expense.metal * number
     expense.energy = expense.energy * number
 end
-function Divide(expense, number)
+
+local function Divide(expense, number)
     expense.metal = expense.metal / number
     expense.energy = expense.energy / number
 end
 
-function BuildTarget(unitID)
+local function BuildTarget(unitID)
     local newTarget = {}
     newTarget.unitDef = UnitDef(unitID)
     
     return newTarget
 end
 
-function MinExpense(expense1, expense2)
-    return Expense(min(expense1.metal, expense2.metal), min(expense1.energy, expense2.energy))
-end
-
-function IdealExpense(buildTarget, builder)
+local _idealExpense = Expense(0, 0)
+local function IdealExpense(buildTarget, builder)
     local cached = idealExpenses[builder.unitDef][buildTarget]
     if cached then
         return cached
     end
-    local idealExpense = Expense(buildTarget.unitDef.metalCost, buildTarget.unitDef.energyCost)
+    _idealExpense.metal = buildTarget.unitDef.metalCost 
+    _idealExpense.energy = buildTarget.unitDef.energyCost
     local rate = builder.unitDef.buildSpeed / buildTarget.unitDef.buildTime
-    Multiply(idealExpense, rate)
-    idealExpenses[builder.unitDef][buildTarget] = idealExpense
-    return idealExpense
+    Multiply(_idealExpense, rate)
+    idealExpenses[builder.unitDef][buildTarget] = _idealExpense
+    return _idealExpense
 end
 
 -- MARK: Helpers
 
-function Clamp(number, lowerBound, upperBound)
+local function Clamp(number, lowerBound, upperBound)
     return max(min(number, upperBound), lowerBound)
 end
 
@@ -259,38 +248,53 @@ function gadget:AllowCommand(unitID, unitDefID, teamID, cmdID, cmdParams, cmdOpt
     return true
 end
 
+local passiveConstructorExpense = {}
+local remainingExpense = {}
+
 function gadget:GameFrame(n)
     for teamID,team in pairs(teams) do
 
-        local passiveConstructorExpense = Expense(0, 0)
-        local remainingExpense = GetResources(teamID)
+        -- Reset resource data (to avoid creating new tables)
+        passiveConstructorExpense.metal = 0
+        passiveConstructorExpense.energy = 0
+        remainingExpense.metal = spGetTeamResources(teamID, "metal")
+        remainingExpense.energy = spGetTeamResources(teamID, "energy")
 
         for builderID,builder in pairs(team.builders) do
             if not spValidUnitID(builderID) then
                 team.builders[builderID] = nil
-                Spring.Echo(builderID .. " was not a valid builder!")
-                break
-            end
-
-            local targetID = spGetUnitIsBuilding(builderID)
-            if not targetID then break end
-            local target = targets[targetID]
-            if not target then
-                target = BuildTarget(targetID)
-                targets[targetID] = target
-            end
-            local builderExpense = IdealExpense(target, builder)
-            if builder.isPassive then
-                spSetUnitBuildSpeed(builderID, builder.unitDef.buildSpeed * passiveConstructorSpeedFactor)
-                Add(passiveConstructorExpense, builderExpense)
+                -- Spring.Echo(builderID .. " was not a valid builder!")
             else
-                Subtract(remainingExpense, builderExpense)
+                -- Spring.Echo(builderID.. " was a valid builder!")
+                local targetID = spGetUnitIsBuilding(builderID)
+                if targetID then
+                    local target = targets[targetID]
+                    if not target then
+                        target = BuildTarget(targetID)
+                        targets[targetID] = target
+                    end
+                    local builderExpense = IdealExpense(target, builder)
+                    if builder.isPassive then
+                        -- Apply build slowing from last frame, then 
+                        builder.buildSpeed = builder.unitDef.buildSpeed * team.passiveConstructorSpeedFactor
+                        -- Spring.Echo("Speed factor: " .. team.passiveConstructorSpeedFactor)
+                        -- Spring.Echo("Build speed set to " .. builder.buildSpeed)
+                        spSetUnitBuildSpeed(builderID, builder.buildSpeed)
+                        Add(passiveConstructorExpense, builderExpense)
+                    else
+                        -- Spring.Echo("Builder was active!")
+                        Subtract(remainingExpense, builderExpense)
+                    end
+                end
             end
         end
         
+        -- Spring.Echo("Previous factor " .. team.passiveConstructorSpeedFactor)
         -- Calculate how much passive builders must be slowed by; this will be applied next frame (for performance reasons)
-
-        passiveConstructorSpeedFactor = min(remainingExpense.metal / passiveConstructorExpense.metal, remainingExpense.energy / passiveConstructorExpense.energy)
-        passiveConstructorSpeedFactor = Clamp(passiveConstructorSpeedFactor, 0, 1)
+        team.passiveConstructorSpeedFactor = min(remainingExpense.metal / passiveConstructorExpense.metal, remainingExpense.energy / passiveConstructorExpense.energy)
+        -- Spring.Echo("Setting factor " .. team.passiveConstructorSpeedFactor)
+        -- Non-zero minimum to prevent the build target from decaying
+        team.passiveConstructorSpeedFactor = Clamp(team.passiveConstructorSpeedFactor, 0.01, 1)
+        -- Spring.Echo("Setting factor " .. team.passiveConstructorSpeedFactor)
     end
 end
