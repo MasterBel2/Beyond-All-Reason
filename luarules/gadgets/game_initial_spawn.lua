@@ -11,6 +11,24 @@ function gadget:GetInfo()
 	}
 end
 
+--[[
+	This gadget handles the period of the game between when the user first loads in and when the players' 
+	commanders have spawned. 
+
+	This includes:
+	- Selecting faction
+	- Selecting start points
+		- Choose in game: ensuring that start points are at least a certain distance apart
+		- FFA: slightly adjust commander start points by a random amount
+		- Team & choose in game: Find start points that are sufficiently far from any selected start points and allocate them to newbies & unplaced players
+	- Indicating player status
+		- Whether they have loaded
+		- Whether they have selected a start location
+		- Whether they are ready
+	- Spawning initial units
+		- Custom unit spawns for Scenarios
+]]
+
 -- Note: (31/03/13) coop_II deals with the extra startpoints etc needed for teamsIDs with more than one playerID.
 
 ----------------------------------------------------------------
@@ -97,14 +115,11 @@ if gadgetHandler:IsSyncedCode() then
 		local name,_,isSpec,tID,_,_,_,_,pRank = Spring.GetPlayerInfo(pID,false)
 		pRank = tonumber(pRank) or 0
 		local customtable = select(11,Spring.GetPlayerInfo(pID)) or {} -- player custom table
+		
 		local tsMu = tostring(customtable.skill) or ""
 		local tsSigma = tonumber(customtable.skilluncertainty) or 3
-		local isNewbie
-		if pRank == 0 and (string.find(tsMu, ")") or tsSigma >= 3) then --rank 0 and not enough ts data
-			isNewbie = true
-		else
-			isNewbie = false
-		end
+
+		local isNewbie = pRank == 0 and (string.find(tsMu, ")") or tsSigma >= 3) --rank 0 and not enough ts data
 		return isNewbie
 	end
 
@@ -288,6 +303,10 @@ if gadgetHandler:IsSyncedCode() then
 		return true
 	end
 
+	----------------------------------------------------------------
+	-- Spawning
+	----------------------------------------------------------------
+
 	local function setPermutedSpawns(nSpawns, idsToSpawn)
 		-- this function assumes that idsToSpawn is a hash table with nSpawns elements
 		-- returns a bijective random map from key values of idsToSpawn to [1,...,nSpawns]
@@ -329,19 +348,19 @@ if gadgetHandler:IsSyncedCode() then
 
 		--spawn starting unit
 		local y = spGetGroundHeight(x,z)
-    local scenarioSpawnsUnits = false
+		local scenarioSpawnsUnits = false
 
-    if  Spring.GetModOptions and  Spring.GetModOptions().scenariooptions then
-      local scenariooptions = Spring.Utilities.json.decode(Spring.Utilities.Base64Decode(Spring.GetModOptions().scenariooptions))
-      if scenariooptions and scenariooptions.unitloadout and next(scenariooptions.unitloadout) then
-        Spring.Echo("Scenario: Spawning loadout instead of regular commanders")
-        scenarioSpawnsUnits = true
-      end
-    end
+		if  Spring.GetModOptions and  Spring.GetModOptions().scenariooptions then
+			local scenariooptions = Spring.Utilities.json.decode(Spring.Utilities.Base64Decode(Spring.GetModOptions().scenariooptions))
+			if scenariooptions and scenariooptions.unitloadout and next(scenariooptions.unitloadout) then
+				Spring.Echo("Scenario: Spawning loadout instead of regular commanders")
+				scenarioSpawnsUnits = true
+			end
+		end
 
-    if not scenarioSpawnsUnits then
-      local unitID = spCreateUnit(startUnit, x, y, z, 0, teamID)
-    end
+		if not scenarioSpawnsUnits then
+			local unitID = spCreateUnit(startUnit, x, y, z, 0, teamID)
+		end
 
 		--share info
 		teamStartPoints[teamID] = {x,y,z}
@@ -375,13 +394,13 @@ if gadgetHandler:IsSyncedCode() then
 		local xmin, zmin, xmax, zmax = spGetAllyTeamStartBox(allyTeamID)
 
 		-- if its choose-in-game mode, see if we need to autoplace anyone
-		if Game.startPosType==2 then
+		if Game.startPosType == 2 then
 			if not startPointTable[teamID] or startPointTable[teamID][1] < 0 then
 				-- guess points for the ones classified in startPointTable as not genuine (newbies will not have a genuine startpoint)
-				x,z=GuessStartSpot(teamID, allyTeamID, xmin, zmin, xmax, zmax, startPointTable)
+				x,z = GuessStartSpot(teamID, allyTeamID, xmin, zmin, xmax, zmax, startPointTable)
 			else
 				--fallback
-				if x<=0 or z<=0 then
+				if x <= 0 or z <= 0 then
 					x = (xmin + xmax) / 2
 					z = (zmin + zmax) / 2
 				end
@@ -392,9 +411,6 @@ if gadgetHandler:IsSyncedCode() then
 		spawnStartUnit(teamID, x, z)
 	end
 
-	----------------------------------------------------------------
-	-- Spawning
-	----------------------------------------------------------------
 	function gadget:GameStart()
 
 		-- ffa mode spawning
@@ -408,7 +424,7 @@ if gadgetHandler:IsSyncedCode() then
 			end
 
 		-- use ffa mode startpoints for random spawning, if possible, but per team instead of per allyTeam
-		if Game.startPosType==1 and ffaStartPoints and ffaStartPoints[spawnTeamsCount] and #(ffaStartPoints[spawnTeamsCount])==spawnTeamsCount then
+		if Game.startPosType == 1 and ffaStartPoints and ffaStartPoints[spawnTeamsCount] and #(ffaStartPoints[spawnTeamsCount]) == spawnTeamsCount then
 			local teamSpawn = setPermutedSpawns(spawnTeamsCount, spawnTeams)
 			for teamID, allyTeamID in pairs(spawnTeams) do
 				spawnFFAStartUnit(spawnTeamsCount, teamSpawn[teamID], teamID)
@@ -512,25 +528,10 @@ else
 	end
 
 	local pStates = {} --local copy of playerStates table
-
-	function StartPointChosen(_,playerID)
-		if playerID == myPlayerID then
-			startPointChosen = true
-			if not readied and Script.LuaUI("PlayerReadyStateChanged") then
-				Script.LuaUI.PlayerReadyStateChanged(playerID, 4)
-			end
-		end
-	end
-
 	function gadget:GameSetup(state,ready,playerStates)
 		-- check when the 3.2.1 countdown starts
 		if gameStarting==nil and ((Spring.GetPlayerTraffic(SYSTEM_ID, NETMSG_STARTPLAYING) or 0) > 0) then --ugly but effective (can also detect by parsing state string)
 			gameStarting = true
-		end
-
-		-- if we can't choose startpositions, no need for ready button etc
-		if Game.startPosType ~= 2 or ffaMode then
-			return true,true
 		end
 
 		-- notify LuaUI if readyStates have changed
@@ -549,15 +550,6 @@ else
 			end
 		end
 
-		-- set my readyState to true if i am a newbie, or if ffa
-		if not readied or not ready then
-			amNewbie = (Spring.GetTeamRulesParam(myTeamID, 'isNewbie') == 1)
-			if amNewbie or ffaMode then
-				readied = true
-				return true, true
-			end
-		end
-
 		if not ready and readied then -- check if we just readied
 			ready = true
 		elseif ready and not readied then	-- check if we just reconnected/dropped
@@ -569,7 +561,7 @@ else
 
 	function gadget:MousePress(sx,sy)
 		-- pressing ready
-		if sx > readyX-(readyW/2) and sx < readyX+(readyW/2) and sy > readyY-(readyH/2) and sy < readyY+(readyH/2) and Spring.GetGameFrame() <= 0 and Game.startPosType == 2 and gameStarting==nil and not spec then
+		if sx > readyX-(readyW/2) and sx < readyX+(readyW/2) and sy > readyY-(readyH/2) and sy < readyY+(readyH/2) and Spring.GetGameFrame() <= 0 and gameStarting==nil and not spec then
 			if startPointChosen then
 				readied = true
 				return true
@@ -587,15 +579,18 @@ else
 		end
 	end
 
-	function gadget:MouseRelease(x,y)
-		return false
-	end
-
 	function gadget:Initialize()
 		gadget:ViewResize(vsx, vsy)
 
 		-- add function to receive when startpoints were chosen
-		gadgetHandler:AddSyncAction("StartPointChosen", StartPointChosen)
+		gadgetHandler:AddSyncAction("StartPointChosen", function(_, playerID)
+			if playerID == myPlayerID then
+				startPointChosen = true
+				if not readied and Script.LuaUI("PlayerReadyStateChanged") then
+					Script.LuaUI.PlayerReadyStateChanged(playerID, 4)
+				end
+			end
+		)
 	end
 
 	function gadget:DrawScreen()
@@ -603,7 +598,7 @@ else
 			Script.LuaUI.GuishaderRemoveRect('ready')
 		end
 
-		if not readied and readyButton and Game.startPosType == 2 and gameStarting==nil and not spec and not isReplay then
+		if not readied and readyButton and gameStarting==nil and not spec and not isReplay then
 		--if not readied and readyButton and not spec and not isReplay then
 
 			if Script.LuaUI("GuishaderInsertRect") then
