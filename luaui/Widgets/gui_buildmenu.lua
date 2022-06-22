@@ -361,6 +361,18 @@ end
 local excludeScavs = not (Spring.Utilities.Gametype.IsScavengers() or Spring.GetModOptions().experimentalscavuniqueunits)
 local excludeChickens = not Spring.Utilities.Gametype.IsChickens()
 
+local cachedIndex = 1
+local unitsToCache = {}
+
+for id, unit in pairs(UnitDefs) do
+	if not excludeScavs or not string.find(unit.name,'_scav') then
+		if not excludeChickens or not string.find(unit.name,'chicken') then
+			table.insert(unitsToCache, id)
+		end
+	end
+end
+
+
 local dlistCache
 local function cacheUnitIcons()
 	if dlistCache then
@@ -1015,9 +1027,22 @@ function widget:DrawScreen()
 		return
 	end
 
-	if Spring.GetGameFrame() == 0 and not cachedUnitIcons then
-		cachedUnitIcons = true
-		--cacheUnitIcons()
+	-- if Spring.GetGameFrame() == 0 and not cachedUnitIcons then
+	-- 	cachedUnitIcons = true
+	-- 	-- cacheUnitIcons()
+	-- end
+
+	if cachedIndex <= #unitsToCache then
+		local id = unitsToCache[cachedIndex]
+		gl.Texture('#'..id)
+		gl.TexRect(-1, -1, 0, 0)
+		if unitIconType[id] and iconTypesMap[unitIconType[id]] then
+			gl.Texture(':l:' .. iconTypesMap[unitIconType[id]])
+			gl.TexRect(-1, -1, 0, 0)
+		end
+		gl.Texture(false)
+		
+		cachedIndex = cachedIndex + 1
 	end
 
 	-- refresh buildmenu if active cmd changed
